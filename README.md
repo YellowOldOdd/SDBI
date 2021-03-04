@@ -126,6 +126,20 @@ python benchmark.py --worker_num=8 --worker_batch=1 --max_batch_size=4 --model_n
   
 总的来说没有不太合理的地方，在benchmark里我也把各部分时间收集和打出来了。
 
+## 施工图
+
+![施工图](./SimpleDBI/arch.jpg)
+
+虽然源码不长(<1000行)，结构也简单。但各种进程和通信还是有点多的。
+
+程序启动时创建context进程，每个数据进程创建模型实例时：
+- context 进程会查看是否已存在对应的模型backend进程
+  - 存在 -> 通过shared memory 建立连接
+  - 不存在 -> 创建backend进程  -> 创建模型进程
+- 多个模型进程是为了充分利用MPS
+- 当用户进程中有多段模型时，会创建相应多个backend进程，比如识别+检测等等
+- 进程间不传输数据，仅传输shared memory地址和tensor元信息。
+
 ## 代码 & 相关说明
 
 原理大概就是这个 [shared_memory sample](./SimpleDBI/shm_sample.py)
@@ -150,5 +164,4 @@ export PYTHONWARNINGS=ignore
 ### 最后
 If **有人感兴趣** and **我有时间** ：
   - 支持一下TensorRT/TensorCore FP16，以及某个特定版本的TF。
-  - 画一下施工图纸。虽然源码不长(<1000行)，但各种进程和通信还是有点多的(所以我还没画..)，有个架构图可以帮助想看了解的同学理解。
   - 输出还没有全用shared memory(主要是我懒)，所以大输出模型的 吞吐/延迟 会受到数据拷贝的影响。可以改进。。。
