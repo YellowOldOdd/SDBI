@@ -136,6 +136,7 @@ python benchmark.py --worker_num=8 --worker_batch=1 --max_batch_size=4 --model_n
  - 基本跟用pytorch差不多，load+forward。但是：
     * 要指定数据最大尺寸，用来分配shared memory
     * 最后要用一个Run函数启动，因为要提前初始化一些进程变量
+    * 需要为模型指定name。当程序涉及到多个模型的时候,数据进程通过name连接到特定的模型进程。
 
 ## Konwn issues
 
