@@ -68,7 +68,7 @@ python benchmark.py  --no_dynamic_batch --worker_num=N --worker_batch=M
 |进程数量|Batch|Latency|Throughput|
 |:-:|:-:|-:|-:| 
 | 16  | 1 | 28.15 ms |526.42 pic/s |
-| 1  | 4 | 18.03 ms |887.20 pic/s|
+| 1  | 16 | 18.03 ms |887.20 pic/s|
 
 可以看到MPS虽然对吞吐有帮助，但是有条件的话，Batching依旧是更好的选择。
 
