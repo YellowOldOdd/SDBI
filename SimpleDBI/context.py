@@ -10,7 +10,7 @@ logger = logging.getLogger('context')
 
 def context_server(ctx_q) :
     backend_entry = {}     # comm queue dict
-    bacend_processes = []  # 
+    backend_processes = []  # 
     logger.debug('Context_server started ...')
 
     while True :
@@ -28,7 +28,7 @@ def context_server(ctx_q) :
             process = mp.Process(target=backend_process, args=(entry, args))
             # process.daemon = True
             process.start()
-            bacend_processes.append(process)
+            backend_processes.append(process)
             
             # 3. registe 
             backend_entry[args['name']] = entry
@@ -38,7 +38,7 @@ def context_server(ctx_q) :
     for k, v in backend_entry.items() :
         v.put(EXIT_SIG)
 
-    for proc in bacend_processes :
+    for proc in backend_processes :
         proc.join()
 
     for k, v in backend_entry.items() :
