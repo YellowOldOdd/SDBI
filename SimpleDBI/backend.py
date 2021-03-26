@@ -38,11 +38,13 @@ def model_process(
     # 1. init model
     if model_type == 'mock' :
         from SimpleDBI.mock_model import MockModel
-        MODEL = MockModel
+        model = MockModel(model_name, model_path)
     elif model_type == 'torch' :
         from SimpleDBI.torch_model import TorchModel
-        MODEL = TorchModel
-    model = MODEL(model_name, model_path)
+        model = TorchModel(model_name, model_path)
+    elif model_type == 'tf' :
+        from SimpleDBI.tf_model import TFModel
+        model = TFModel(model_name, model_path, input_info, output_info)
 
     logger.debug('model_process up')
 
