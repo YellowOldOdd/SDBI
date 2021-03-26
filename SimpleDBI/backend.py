@@ -107,7 +107,7 @@ class Backend(object) :
         self.name = args['name']
         
         self.input_tensor_queue   = queue.Queue(maxsize = MAX_SESSION_SLOT_NUM)
-        self.bacthed_tensor_queue = queue.Queue(maxsize = MAX_BATCHED_TENSOR_NUM)
+        self.batched_tensor_queue = queue.Queue(maxsize = MAX_BATCHED_TENSOR_NUM)
         self.output_tensor_queue  = queue.Queue(maxsize = MAX_SESSION_SLOT_NUM)
 
         self.dynamic_batch = args.get('dynamic_batch') 
@@ -383,7 +383,7 @@ class Backend(object) :
                     index.metric.model_queue_put = t
                     index.metric.batch_size = batch_size
                     index.metric.concat = concat_latency
-                self.bacthed_tensor_queue.put((shm_idx, shapes, batch_index))
+                self.batched_tensor_queue.put((shm_idx, shapes, batch_index))
             except :
                 logger.error(traceback.format_exc())
             
@@ -435,7 +435,7 @@ class Backend(object) :
         while self.alive :
             try :
                 shm_idx, shapes, batch_index = \
-                    self.bacthed_tensor_queue.get(timeout=1)
+                    self.batched_tensor_queue.get(timeout=1)
             except queue.Empty :
                 continue
 
