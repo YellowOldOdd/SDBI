@@ -9,11 +9,9 @@ import queue
 import threading
 import traceback
 
-from multiprocessing import shared_memory
 from time import time
-
 from SimpleDBI.backend_metric import BackendMetric
-from SimpleDBI.shm_utils import ShmInfo, create_shm, get_shm, close_shm
+from SimpleDBI.shm_handler import ShmHandler, gen_name
 
 EXIT_SIG = -1
 MAX_SESSION_SLOT_NUM = 128
@@ -45,19 +43,32 @@ def model_process(
     elif model_type == 'tf' :
         from SimpleDBI.tf_model import TFModel
         model = TFModel(model_name, model_path, input_info, output_info)
+    else :
+        logger.error('ERROR MODEL TYPE : {}'.format(model_type))
 
     logger.debug('model_process up')
 
     # 2. create shared memoty
-    output_shm_name, output_shm, output_shm_arr = create_shm(output_info)
+    # 2.1 create output shared memory
+    output_shm_name = []
+    output_shm = []
+    for info in output_info :
+        shm_name = gen_name(info['name'])
+        sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
+        sh.create_shm()
+        output_shm_name.append(shm_name)
+        output_shm.append(sh)
 
+    # 2.2 load input shared memory
     input_shm_name_list = conn.recv()
     input_shm_list = []
-    input_shm_arr_list = []
     for input_shm_name in input_shm_name_list :
-        input_shm, input_shm_arr = get_shm(input_shm_name, input_info)
+        input_shm = []
+        for shm_name, info in zip(input_shm_name, input_info) :
+            sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
+            sh.load_shm()
+            input_shm.append(sh)
         input_shm_list.append(input_shm)
-        input_shm_arr_list.append(input_shm_arr)
 
     conn.send(output_shm_name)
 
@@ -67,36 +78,40 @@ def model_process(
         if value == EXIT_SIG :
             break
         
-        # load input 
+        # 3.1 load input 
         shm_idx, shapes = value
         inputs = []
-        input_shm_arr = input_shm_arr_list[shm_idx]
-        for shape, shm_arr in zip(shapes, input_shm_arr) :
-            shape = list(shape)
-            shm_arr = shm_arr.reshape([-1] + shape[1:])
-            input_arr = shm_arr[:shape[0]]
-            inputs.append(input_arr)
+        input_shm = input_shm_list[shm_idx]
+        for shape, sh in zip(shapes, input_shm) :
+            shm_arr = sh.ndarray(shape)
+            # input_arr = shm_arr[:]
+            # inputs.append(input_arr)
+            inputs.append(shm_arr)
 
-        # forward
+        # 3.2 forward
         outputs = model.forward(*inputs)
 
-        # write output
+        # 3.3 write output
         shapes = []
-        for output, shm_arr in zip(outputs, output_shm_arr) :
-            shape = list(output.shape)
-            shm_arr = shm_arr.reshape([-1] + shape[1:])
-            shm_arr[:shape[0]] = output[:]
-            shapes.append(output.shape)
-        
+        for output, sh in zip(outputs, output_shm) :
+            shape = output.shape
+            shm_arr = sh.ndarray(shape)
+            shm_arr[:] = output[:]
+            shapes.append(shape)
+
         conn.send(shapes)
         shm_queue.put(shm_idx) # send shared memory to avalible queue
     
     # 4. clean
-    close_shm(input_shm, input_shm_arr, False)
+    for input_shm in input_shm_list :
+        for sh in input_shm :
+            sh.close()
+
     conn.send(True)
     stat = conn.recv()
     assert stat
-    close_shm(output_shm, output_shm_arr, True)
+    for sh in output_shm :
+        sh.close()
 
     conn.close()
     logger.debug('Model process exit.')
@@ -125,29 +140,28 @@ class Backend(object) :
         self.io_queue_lock = threading.Lock() # lock for create request handler
 
         # input shared memory
-        self.input_info = []                  # model input info
-        self.input_shm_name = []              # shared memory name for concat and inference
-        self.input_shm = []                   # shared memory for concat and inference
-        self.input_shm_arr = []               # shared memory array for concat and inference
+        self.input_shm_name_set = []              # shared memory name for concat and inference
+        self.input_shm_set = []                   # shared memory for concat and inference
         self.input_shm_queue = mp.Queue(maxsize=3 * self.duplicate_num)
+        
+        self.input_info = args.get('input_info')
+        # create a set of input shared memory
+        for idx in range(3 * self.duplicate_num) :
+            input_shm_name = [] 
+            input_shm = []
+            for info in self.input_info :
+                shm_name = gen_name(info['name'], suffix = idx)
+                sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
+                sh.create_shm()
+                input_shm_name.append(shm_name)
+                input_shm.append(sh)
 
-        for info in args.get('input_info') :
-            self.input_info.append(
-                ShmInfo(info['name'], info['max_shape'], info['dtype']))
-        for idx in range(3 * self.duplicate_num) : 
-            input_shm_name, input_shm, input_shm_arr = \
-                create_shm(self.input_info, name_suffix=idx)
-
-            self.input_shm_name.append(input_shm_name)
-            self.input_shm.append(input_shm)
-            self.input_shm_arr.append(input_shm_arr)
+            self.input_shm_name_set.append(input_shm_name)
+            self.input_shm_set.append(input_shm)
             self.input_shm_queue.put(idx)
         
         # output shared memory info
-        self.output_info = []                 
-        for info in args.get('output_info') :
-            self.output_info.append(
-                ShmInfo(info['name'], info['max_shape'], info['dtype']))
+        self.output_info = args.get('output_info')
 
         self.use_mps = False      if self.use_mps is None else self.use_mps
         self.timeout = 0.001      if self.timeout is None else self.timeout
@@ -182,30 +196,25 @@ class Backend(object) :
             t.join()
         logger.debug('All backend {} thread exit.'.format(self.name))
 
-        for input_shm, input_shm_arr in zip(self.input_shm, self.input_shm_arr) :
-            close_shm(input_shm, input_shm_arr, True)
+        for input_shm in self.input_shm_set :
+            for sh in input_shm :
+                sh.close()
 
     def request_handler(self, conn) :
-        process_shms = []
 
-        def get_tensor_info_from_session(create_shm) :
+        def get_tensor_info_from_session(create) :
             tensor_info = conn.recv()
-            shm_arr_list = []
+            shm_list = []
             for info in tensor_info :
-                shm_name = info['shm_name']
-                dtype = info['dtype']
-                shape = info['max_shape']
-                shm_size = info['shm_size']
-
-                shm = shared_memory.SharedMemory(
-                    name=shm_name, create=create_shm, size=shm_size)
-                process_shms.append((shm, create_shm))
-
-                shm_arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-                shm_arr_list.append(shm_arr)
+                sh = ShmHandler(info['shm_name'], info['max_shape'], info['dtype'])
+                if create :
+                    sh.create_shm()
+                else :
+                    sh.load_shm()
+                shm_list.append(sh)
 
             conn.send(True)
-            return shm_arr_list
+            return shm_list
 
         # 1. get dtype and max size 
         input_shm = get_tensor_info_from_session(False)
@@ -221,51 +230,52 @@ class Backend(object) :
         while True :
             value = conn.recv()
 
+            # 4.1 handle exit signal
             time_metric = BackendMetric()
             time_metric.arrive = time()
 
             if value == EXIT_SIG :
                 break
             shapes = value
+            
+            # 4.2 push input to queue
             inputs = []
-            for shape, shm_arr in zip(shapes, input_shm) :
-                shape = list(shape)
-                shm_arr = shm_arr.reshape([-1] + shape[1:])
-                input_arr = shm_arr[:shape[0]]
+            for shape, sh in zip(shapes, input_shm) :
+                input_arr = sh.ndarray(shape)
                 inputs.append(input_arr)
             
             time_metric.input_queue_put = time()
             self.input_tensor_queue.put((inputs, QID, time_metric))
             
+            # 4.3 pop output from queue
             outputs, metric = self.io_queues[QID].get()
             shapes = []
-            for output_arr, shm_arr in zip(outputs, output_shm) :
-                shape = list(output_arr.shape)
-                shm_arr = shm_arr.reshape([-1] + shape[1:])
-                shm_arr[:shape[0]] = output_arr[:]
-                shapes.append(output_arr.shape)
+            for output_arr, sh in zip(outputs, output_shm) :
+                shape = output_arr.shape
+                shm_arr = sh.ndarray(shape)
+                shm_arr[:] = output_arr[:]
+                shapes.append(shape)
 
+            # 4.4 tell session the inference is finished
             metric.send = time()
             conn.send((shapes, metric))
             # print_metric(metric)
         
+        # 5. clean
         try :
-            for shm, hold_src in process_shms :
-                if not hold_src :
-                    shm.close()
+            for shm in output_shm :
+                shm.close()
         except :
             pass
 
-        # remote shared memory cleaned
+        # wait for remote shared memory cleaned
         conn.send(EXIT_SIG)
         conn.recv()
 
         # clean local shared memory
         try :
-            for shm, hold_src in process_shms :
-                if hold_src :
-                    shm.close()
-                    shm.unlink()
+            for shm, hold_src in input_shm :
+                shm.close()
         except :
             pass
 
@@ -342,9 +352,9 @@ class Backend(object) :
                     # print('add latency : {}'.format((time() - start)*1000))
                     return True
                 
+                # 1. append tensor
                 if latest_tensor is not None :
-                    assert add_tensor(latest_tensor, latest_qid, latest_metric)
-                
+                    assert add_tensor(latest_tensor, latest_qid, latest_metric) 
                 while True :
                     try :
                         latest_tensor, latest_qid, latest_metric = \
@@ -367,19 +377,21 @@ class Backend(object) :
                                 # print('batch_handler exit.')
                                 return
                 
+                # 2. concat tensors
                 start = time()
                 shapes = []
                 shm_idx = self.input_shm_queue.get()
-                input_shm_arr = self.input_shm_arr[shm_idx]
-                for tensors, shm_arr in zip(tensor_list, input_shm_arr) :
+                input_shm = self.input_shm_set[shm_idx]
+                for tensors, sh in zip(tensor_list, input_shm) :
                     shape = list(tensors[0].shape)
                     shape[0] = batch_size
-                    batch_data = shm_arr[:batch_size]
+                    batch_data = sh.ndarray(shape)
                     np.concatenate(tensors, axis = 0, out = batch_data)
                     shapes.append(shape)
 
                 concat_latency = time() - start
 
+                # 3. push meta info to queue
                 t = time()
                 for index in batch_index :
                     index.metric.model_queue_put = t
@@ -428,10 +440,14 @@ class Backend(object) :
         proc.start()
 
         # 2. create shared memory
-        conn_backend.send(self.input_shm_name)
+        conn_backend.send(self.input_shm_name_set)
 
         output_shm_name = conn_backend.recv()
-        output_shm, output_shm_arr = get_shm(output_shm_name, self.output_info)
+        output_shm = []
+        for shn_name, info in zip(output_shm_name, self.output_info) :
+            sh = ShmHandler(shn_name, info['max_shape'], info['dtype'])
+            sh.load_shm()
+            output_shm.append(sh)
 
         # 3. inference
         while self.alive :
@@ -449,11 +465,10 @@ class Backend(object) :
             shapes = conn_backend.recv()
 
             batch_output = []
-            for shape, shm_arr in zip(shapes, output_shm_arr) :
-                shape = list(shape)
-                shm_arr = shm_arr.reshape([-1] + shape[1:])
+            for shape, sh in zip(shapes, output_shm) :
+                shm_arr = sh.ndarray(shape)
                 output_arr = np.empty(shape, shm_arr.dtype)
-                output_arr[:] = shm_arr[:shape[0]]
+                output_arr[:] = shm_arr[:]
                 batch_output.append(output_arr)
 
             for index in batch_index :
@@ -463,7 +478,8 @@ class Backend(object) :
         # 4. clean 
         conn_backend.send(EXIT_SIG)
         stat = conn_backend.recv()
-        close_shm(output_shm, output_shm_arr, False)
+        for sh in output_shm :
+            sh.close()
         conn_backend.send(True)
 
         proc.join()
