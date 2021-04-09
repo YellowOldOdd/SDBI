@@ -61,7 +61,6 @@ class Session(object) :
         # 3. share memory with backend
         self.input_shm = []
         self.output_shm = []
-        self.metric = metric
         
         def _shm_info(tensor_infos) :
             for info in tensor_infos :
@@ -115,8 +114,7 @@ class Session(object) :
             shapes.append(shape)
         
         self.conn_s.send(shapes)
-        shapes, metric = self.conn_s.recv()
-        # print_metric(metric)
+        shapes = self.conn_s.recv()
 
         outputs = []
         for shape, sh in zip(shapes, self.output_shm) : 
@@ -127,9 +125,6 @@ class Session(object) :
             outputs.append(tensor)
 
         result = outputs[0] if len(outputs) == 1 else tuple(outputs)
-
-        if self.metric :
-            return result, metric
         
         return result
 
@@ -137,9 +132,9 @@ def target_wrapper(ctx_q, target, args, kwargs) :
     set_context_queue(ctx_q)
     target(*args, **kwargs)
 
-def Run(target, worker_num, args=(), kwargs = {}) :
+def Run(target, worker_num, metric_queue = None, args = (), kwargs = {}) :
     ctx_q = mp.Queue()
-    ctx_process = mp.Process(target=context_server, args=(ctx_q, ))
+    ctx_process = mp.Process(target=context_server, args=(ctx_q, metric_queue))
     ctx_process.start()
 
     sess_process = []

@@ -8,7 +8,7 @@ from SimpleDBI.backend import Backend, backend_process
 
 logger = logging.getLogger('context')
 
-def context_server(ctx_q) :
+def context_server(ctx_q, metric_q) :
     backend_entry = {}     # comm queue dict
     backend_processes = []  # 
     logger.debug('Context_server started ...')
@@ -25,7 +25,7 @@ def context_server(ctx_q) :
             entry = mp.Queue()
             
             # 2. create backend
-            process = mp.Process(target=backend_process, args=(entry, args))
+            process = mp.Process(target=backend_process, args=(entry, metric_q, args))
             # process.daemon = True
             process.start()
             backend_processes.append(process)

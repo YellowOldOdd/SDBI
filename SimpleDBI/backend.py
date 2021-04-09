@@ -10,7 +10,7 @@ import threading
 import traceback
 
 from time import time
-from SimpleDBI.backend_metric import BackendMetric
+# from SimpleDBI.backend_metric import BackendMetric
 from SimpleDBI.shm_handler import ShmHandler, gen_name
 
 EXIT_SIG = -1
@@ -20,13 +20,15 @@ MAX_BATCHED_TENSOR_NUM = 32
 logger = logging.getLogger('backend')
 
 BatchedIndex = collections.namedtuple(
-    'BatchedIndex', ['qid', 'length', 'metric']
+    'BatchedIndex', ['qid', 'length']
 )
 
-def backend_process(entry_queue, args) : 
+def backend_process(entry_q, metric_q, args) : 
+    if metric_q is not None :
+        args['metric_queue'] = metric_q
     backend = Backend(args)
     backend.start()
-    backend.session_connector(entry_queue)
+    backend.session_connector(entry_q)
     backend.close()
     logger.debug('Backend process exit.')
 
@@ -135,6 +137,9 @@ class Backend(object) :
         self.timeout = args.get('timeout') 
         self.use_mps = args.get('use_mps') 
 
+        self.metric_q = args.get('metric_queue')
+        self.tags = {'model' : self.name}
+
         self.threads = {}                     # all threads
         self.io_queues = []                   # io queue of request handler
         self.io_queue_lock = threading.Lock() # lock for create request handler
@@ -168,9 +173,17 @@ class Backend(object) :
         self.dynamic_batch = True if self.dynamic_batch is None else self.dynamic_batch
         self.max_batch_size = 32  if self.max_batch_size is None else self.max_batch_size
         self.duplicate_num = 1    if self.duplicate_num is None else self.duplicate_num
+
         
     def __del__(self) :
         logger.debug('Backend {} quit'.format(self.name))
+    
+    def emit_metric(self, points) :
+        if self.metric_q is not None :
+            self.metric_q.put({
+                "tags"        : self.tags,
+                "fields"      : points,
+            })
 
     def start(self) :
         self.alive = True
@@ -231,24 +244,21 @@ class Backend(object) :
             value = conn.recv()
 
             # 4.1 handle exit signal
-            time_metric = BackendMetric()
-            time_metric.arrive = time()
-
             if value == EXIT_SIG :
                 break
             shapes = value
             
+            start_ts = time()
             # 4.2 push input to queue
             inputs = []
             for shape, sh in zip(shapes, input_shm) :
                 input_arr = sh.ndarray(shape)
                 inputs.append(input_arr)
             
-            time_metric.input_queue_put = time()
-            self.input_tensor_queue.put((inputs, QID, time_metric))
+            self.input_tensor_queue.put((inputs, QID, time()))
             
             # 4.3 pop output from queue
-            outputs, metric = self.io_queues[QID].get()
+            outputs = self.io_queues[QID].get()
             shapes = []
             for output_arr, sh in zip(outputs, output_shm) :
                 shape = output_arr.shape
@@ -257,9 +267,8 @@ class Backend(object) :
                 shapes.append(shape)
 
             # 4.4 tell session the inference is finished
-            metric.send = time()
-            conn.send((shapes, metric))
-            # print_metric(metric)
+            conn.send((shapes))
+            self.emit_metric({'forward_cost' : time() - start_ts})
         
         # 5. clean
         try :
@@ -316,7 +325,6 @@ class Backend(object) :
         '''
         latest_tensor = None
         latest_qid = None
-        latest_metric = None
 
         while self.alive : 
             try :
@@ -324,7 +332,7 @@ class Backend(object) :
                 tensor_list = []  # batch data
                 batch_index = []  # batch index
 
-                def add_tensor(tensor : list , qid : int, metric : BackendMetric) :
+                def add_tensor(tensor : list , qid : int, ) :
                     # start = time()
                     nonlocal batch_size 
                     nonlocal tensor_list
@@ -348,23 +356,22 @@ class Backend(object) :
                     for ts, ts_l in zip(tensor, tensor_list) :
                         ts_l.append(ts)
                     
-                    batch_index.append(BatchedIndex(qid, bs, metric))
+                    batch_index.append(BatchedIndex(qid, bs))
                     # print('add latency : {}'.format((time() - start)*1000))
                     return True
                 
                 # 1. append tensor
+                start_ts = time()
                 if latest_tensor is not None :
-                    assert add_tensor(latest_tensor, latest_qid, latest_metric) 
+                    assert add_tensor(latest_tensor, latest_qid,) 
                 while True :
                     try :
-                        latest_tensor, latest_qid, latest_metric = \
+                        latest_tensor, latest_qid, arrive_ts = \
                             self.input_tensor_queue.get(timeout = self.timeout)
-                        latest_metric.input_queue_get = time()
+                        # self.emit_metric({'backend_input_queue_cost' : time() - arrive_ts})
 
-                        # start = time()
-                        if not add_tensor(latest_tensor, latest_qid, latest_metric) :
+                        if not add_tensor(latest_tensor, latest_qid,) :
                             break
-                        # print('add latency : {}'.format((time() - start)*1000))
                         
                     except queue.Empty :
                         latest_tensor, latest_qid = None, None
@@ -374,11 +381,12 @@ class Backend(object) :
                             if self.alive :
                                 continue            
                             else :
-                                # print('batch_handler exit.')
+                                logger.debug('batch_handler exit.')
                                 return
+                self.emit_metric({'backend_batch_gather_cost' : time() - start_ts})
                 
                 # 2. concat tensors
-                start = time()
+                start_ts = time()
                 shapes = []
                 shm_idx = self.input_shm_queue.get()
                 input_shm = self.input_shm_set[shm_idx]
@@ -388,16 +396,11 @@ class Backend(object) :
                     batch_data = sh.ndarray(shape)
                     np.concatenate(tensors, axis = 0, out = batch_data)
                     shapes.append(shape)
-
-                concat_latency = time() - start
-
+                
+                self.emit_metric({'backend_batch_size' : batch_size})
+                self.emit_metric({'backend_batch_concat_cost' : time() - start_ts})
                 # 3. push meta info to queue
-                t = time()
-                for index in batch_index :
-                    index.metric.model_queue_put = t
-                    index.metric.batch_size = batch_size
-                    index.metric.concat = concat_latency
-                self.batched_tensor_queue.put((shm_idx, shapes, batch_index))
+                self.batched_tensor_queue.put((shm_idx, shapes, batch_index, time()))
             except :
                 logger.error(traceback.format_exc())
             
@@ -408,12 +411,8 @@ class Backend(object) :
                     self.output_tensor_queue.get(timeout=1)
             except queue.Empty :
                 continue
-                
-            # metric
-            t = time()
-            for index in batch_index :
-                index.metric.output_queue_get = t
-            
+
+            start_ts = time()
             offset = 0
             for index in batch_index :
                 outputs = []
@@ -424,8 +423,8 @@ class Backend(object) :
                     output[:] = tensor[offset: offset + index.length]
                     outputs.append(output)
                 offset += index.length
-                index.metric.backend_end = time()
-                self.io_queues[index.qid].put((outputs, index.metric))
+                self.io_queues[index.qid].put((outputs))
+            self.emit_metric({'backend_scatter_cost' : time() - start_ts})
 
         logger.debug('output_handler exit.')
 
@@ -451,18 +450,17 @@ class Backend(object) :
 
         # 3. inference
         while self.alive :
+            start_ts = time()
             try :
-                shm_idx, shapes, batch_index = \
+                shm_idx, shapes, batch_index, batch_q_ts = \
                     self.batched_tensor_queue.get(timeout=1)
             except queue.Empty :
                 continue
 
-            t = time()
-            for index in batch_index :
-                index.metric.model_queue_get = t
-
+            model_start_ts = time()
             conn_backend.send((shm_idx, shapes))
             shapes = conn_backend.recv()
+            self.emit_metric({'backend_forward_model_cost' : time() - model_start_ts})
 
             batch_output = []
             for shape, sh in zip(shapes, output_shm) :
@@ -471,8 +469,7 @@ class Backend(object) :
                 output_arr[:] = shm_arr[:]
                 batch_output.append(output_arr)
 
-            for index in batch_index :
-                index.metric.output_queue_put = t
+            self.emit_metric({'backend_forward_cost' : time() - start_ts})
             self.output_tensor_queue.put((batch_output, batch_index))
         
         # 4. clean 
