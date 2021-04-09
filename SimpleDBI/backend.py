@@ -268,7 +268,10 @@ class Backend(object) :
 
             # 4.4 tell session the inference is finished
             conn.send((shapes))
-            self.emit_metric({'forward_cost' : time() - start_ts})
+            self.emit_metric({
+                'forward_cost' : time() - start_ts,
+                'cnt' : shapes[0][0],
+            })
         
         # 5. clean
         try :
