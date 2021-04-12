@@ -108,7 +108,6 @@ def model_process(
                 output_shapes.append(shape)
 
         except :
-            self.emit_metric({'model_process_error_counter' : 1})
             logger.error('model_process runtime error')
             logger.error(traceback.format_exc())
 
@@ -408,9 +407,10 @@ class Backend(object) :
                 
                 # 1. append tensor
                 start_ts = time()
+                end = time() + self.timeout
                 if latest_tensor is not None :
                     assert add_tensor(latest_tensor, latest_qid,) 
-                while True :
+                while time() < end :
                     try :
                         latest_tensor, latest_qid, arrive_ts = \
                             self.input_tensor_queue.get(timeout = self.timeout)
@@ -429,6 +429,9 @@ class Backend(object) :
                             else :
                                 logger.debug('batch_handler exit.')
                                 return
+                
+                if batch_size == 0 :
+                    continue
                 self.emit_metric({'backend_batch_gather_cost' : time() - start_ts})
                 
                 # 2. concat tensors
