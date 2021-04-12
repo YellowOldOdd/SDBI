@@ -407,10 +407,12 @@ class Backend(object) :
                 
                 # 1. append tensor
                 start_ts = time()
-                end = time() + self.timeout
+
                 if latest_tensor is not None :
                     assert add_tensor(latest_tensor, latest_qid,) 
-                while time() < end :
+                
+                end = time() + self.timeout
+                while time() < end or batch_size < 1  :
                     try :
                         latest_tensor, latest_qid, arrive_ts = \
                             self.input_tensor_queue.get(timeout = self.timeout)
@@ -430,8 +432,6 @@ class Backend(object) :
                                 logger.debug('batch_handler exit.')
                                 return
                 
-                if batch_size == 0 :
-                    continue
                 self.emit_metric({'backend_batch_gather_cost' : time() - start_ts})
                 
                 # 2. concat tensors
