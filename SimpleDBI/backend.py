@@ -270,7 +270,7 @@ class Backend(object) :
             conn.send((shapes))
             self.emit_metric({
                 'forward_cost' : time() - start_ts,
-                'cnt' : shapes[0][0],
+                'query_counter' : shapes[0][0],
             })
         
         # 5. clean
@@ -400,7 +400,7 @@ class Backend(object) :
                     np.concatenate(tensors, axis = 0, out = batch_data)
                     shapes.append(shape)
                 
-                self.emit_metric({'backend_batch_size' : batch_size})
+                self.emit_metric({'backend_batch_value' : batch_size})
                 self.emit_metric({'backend_batch_concat_cost' : time() - start_ts})
                 # 3. push meta info to queue
                 self.batched_tensor_queue.put((shm_idx, shapes, batch_index, time()))
