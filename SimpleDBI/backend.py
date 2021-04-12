@@ -9,7 +9,7 @@ import queue
 import threading
 import traceback
 
-from time import time
+from time import time, sleep
 from SimpleDBI.shm_handler import ShmHandler, gen_name
 
 EXIT_SIG = -1
@@ -219,6 +219,12 @@ class Backend(object) :
             t.start()
             self.threads['gpu_model_{}'.format(idx)] = t
 
+        t = threading.Thread(target=self.qmonitor, )
+        t.setDaemon(True)
+        t.start()
+        self.threads['qmonitor'] = t
+
+
     def close(self) :
         self.alive = False
 
@@ -230,6 +236,18 @@ class Backend(object) :
         for input_shm in self.input_shm_set :
             for sh in input_shm :
                 sh.close()
+    
+    def qmonitor(self) : 
+        while self.alive : 
+            end = float(int(time()) + 1)
+            while time() < end :
+                sleep(0.1)
+                self.emit_metric(
+                    {'input_tensor_qsize_value' : self.input_tensor_queue.qsize()})
+                self.emit_metric(
+                    {'batched_tensor_qsize_value' : self.batched_tensor_queue.qsize()})
+                self.emit_metric(
+                    {'output_tensor_qsize_value' : self.output_tensor_queue.qsize()})
 
     def request_handler(self, conn) :
 

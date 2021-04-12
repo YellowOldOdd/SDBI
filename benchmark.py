@@ -116,7 +116,8 @@ def metrics(metric_q) :
     
     print('------------------------------')
     for k, v in metrics.items() :
-        if k == 'request_counter' :
+        if k in ['request_counter', 'input_tensor_qsize_value', 
+            'batched_tensor_qsize_value', 'output_tensor_qsize_value'] :
             continue
         if k == 'backend_batch_size_value' :
             print('{:30s} avg : {:.4f} (over {} queries)'.format(
