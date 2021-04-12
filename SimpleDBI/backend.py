@@ -412,7 +412,10 @@ class Backend(object) :
                     assert add_tensor(latest_tensor, latest_qid,) 
                 
                 end = time() + self.timeout
-                while time() < end or batch_size < 1  :
+                while True :
+                    if time() > end and batch_size > 1 : 
+                        latest_tensor, latest_qid = None, None
+                        break
                     try :
                         latest_tensor, latest_qid, arrive_ts = \
                             self.input_tensor_queue.get(timeout = self.timeout)
