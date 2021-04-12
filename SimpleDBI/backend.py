@@ -23,13 +23,17 @@ BatchedIndex = collections.namedtuple(
 )
 
 def backend_process(entry_q, metric_q, args) : 
-    if metric_q is not None :
-        args['metric_queue'] = metric_q
-    backend = Backend(args)
-    backend.start()
-    backend.session_connector(entry_q)
-    backend.close()
-    logger.debug('Backend process exit.')
+    try :
+        if metric_q is not None :
+            args['metric_queue'] = metric_q
+        backend = Backend(args)
+        backend.start()
+        backend.session_connector(entry_q)
+        backend.close()
+        logger.debug('Backend process exit.')
+    except :
+        logger.error('backend_process initialize error')
+        logger.error(traceback.format_exc())
 
 def model_process(
         model_name, model_type, model_path, 
@@ -83,14 +87,13 @@ def model_process(
         if value == EXIT_SIG :
             break
         
-        shm_idx, shapes = value
+        shm_idx, input_shapes = value
         inputs = []
-        shapes = []
-
+        output_shapes = []
         try :
             # 3.1 load input 
             input_shm = input_shm_list[shm_idx]
-            for shape, sh in zip(shapes, input_shm) :
+            for shape, sh in zip(input_shapes, input_shm) :
                 shm_arr = sh.ndarray(shape)
                 inputs.append(shm_arr)
 
@@ -102,13 +105,15 @@ def model_process(
                 shape = output.shape
                 shm_arr = sh.ndarray(shape)
                 shm_arr[:] = output[:]
-                shapes.append(shape)
+                output_shapes.append(shape)
 
         except :
+            self.emit_metric({'model_process_error_counter' : 1})
             logger.error('model_process runtime error')
             logger.error(traceback.format_exc())
+
         finally :
-            conn.send(shapes)
+            conn.send(output_shapes)
             shm_queue.put(shm_idx) # send shared memory to avalible queue
 
     
@@ -243,49 +248,68 @@ class Backend(object) :
             conn.send(True)
             return shm_list
 
-        # 1. get dtype and max size 
-        input_shm = get_tensor_info_from_session(False)
-        output_shm = get_tensor_info_from_session(True)
+        try :
+            # 1. get dtype and max size 
+            input_shm = get_tensor_info_from_session(False)
+            output_shm = get_tensor_info_from_session(True)
 
-        # 3. get io id
-        self.io_queue_lock.acquire()
-        self.io_queues.append(queue.Queue(maxsize=1)) # like a thread pipe
-        QID = len(self.io_queues) - 1
-        self.io_queue_lock.release()
+            # 2. get io id
+            self.io_queue_lock.acquire()
+            self.io_queues.append(queue.Queue(maxsize=1)) # like a thread pipe
+            QID = len(self.io_queues) - 1
+            self.io_queue_lock.release()
+        except :
+            logger.error('request_handler initialize error')
+            logger.error(traceback.format_exc())
+            return 
 
-        # 4. listening for request tensor
+        # 3. listening for request tensor
         while True :
             value = conn.recv()
+            start_ts = time()
 
-            # 4.1 handle exit signal
+            # 3.1 handle exit signal
             if value == EXIT_SIG :
                 break
-            shapes = value
-            
-            start_ts = time()
-            # 4.2 push input to queue
-            inputs = []
-            for shape, sh in zip(shapes, input_shm) :
-                input_arr = sh.ndarray(shape)
-                inputs.append(input_arr)
-            
-            self.input_tensor_queue.put((inputs, QID, time()))
-            
-            # 4.3 pop output from queue
-            outputs = self.io_queues[QID].get()
-            shapes = []
-            for output_arr, sh in zip(outputs, output_shm) :
-                shape = output_arr.shape
-                shm_arr = sh.ndarray(shape)
-                shm_arr[:] = output_arr[:]
-                shapes.append(shape)
+            input_shapes = value
+            output_shapes = []
 
-            # 4.4 tell session the inference is finished
-            conn.send((shapes))
-            self.emit_metric({
-                'forward_cost' : time() - start_ts,
-                'request_counter' : shapes[0][0],
-            })
+            if len(input_shapes) < 1 :
+                return None
+
+            try :
+                # 3.2 push input to queue
+                inputs = []
+                for shape, sh in zip(input_shapes, input_shm) :
+                    if shape[0] > self.max_batch_size :
+                        self.emit_metric({'batchsize_error_counter' : 1})
+                        raise RuntimeError(
+                            'Batch size {} > max_batch_size({}).'.format(
+                                shape[0], self.max_batch_size))
+                    input_arr = sh.ndarray(shape)
+                    inputs.append(input_arr)
+                
+                self.input_tensor_queue.put((inputs, QID, time()))
+                
+                # 3.3 pop output from queue
+                outputs = self.io_queues[QID].get()
+                for output_arr, sh in zip(outputs, output_shm) :
+                    shape = output_arr.shape
+                    shm_arr = sh.ndarray(shape)
+                    shm_arr[:] = output_arr[:]
+                    output_shapes.append(shape)
+
+                # 3.4 tell session the inference is finished
+                self.emit_metric({
+                    'forward_cost' : time() - start_ts,
+                    'request_counter' : input_shapes[0][0],
+                })
+            except :
+                self.emit_metric({'request_handler_error_counter' : 1})
+                logger.error('request_handler runtime error')
+                logger.error(traceback.format_exc())
+            finally :
+                conn.send((output_shapes))
         
         # 5. clean
         try :
@@ -319,20 +343,25 @@ class Backend(object) :
                 # print('session_connector receive quit signal')
                 break
             
-            conn = value 
+            try :
+                conn = value 
 
-            # 1. connection built, ping back 
-            conn.send(True)
+                # 1. connection built, ping back 
+                conn.send(True)
 
-            # 2. start dataloader thread
-            req_thread = threading.Thread(
-                target = self.request_handler, args = (conn, ))
-            req_thread.setDaemon(True)
-            req_thread.start()
+                # 2. start dataloader thread
+                req_thread = threading.Thread(
+                    target = self.request_handler, args = (conn, ))
+                req_thread.setDaemon(True)
+                req_thread.start()
 
-            # self.threads.append(req_thread)
-            self.threads['req_{}'.format(conn_num)] = req_thread
-            conn_num +=1 
+                # self.threads.append(req_thread)
+                self.threads['req_{}'.format(conn_num)] = req_thread
+                conn_num +=1 
+            
+            except :
+                logger.error('session_connector runtime error.')
+                logger.error(traceback.format_exc())
 
         logger.debug('{} session_connector quit.'.format(self.name))
 
@@ -419,6 +448,9 @@ class Backend(object) :
                 # 3. push meta info to queue
                 self.batched_tensor_queue.put((shm_idx, shapes, batch_index, time()))
             except :
+                self.emit_metric({'batch_handler_error_counter' : 1})
+                logger.error('batch_handler runtime error')
+                logger.error('may cause unkonwn behavior...')
                 logger.error(traceback.format_exc())
             
     def output_handler(self) :
@@ -428,42 +460,56 @@ class Backend(object) :
                     self.output_tensor_queue.get(timeout=1)
             except queue.Empty :
                 continue
-
+            
             start_ts = time()
             offset = 0
             for index in batch_index :
                 outputs = []
-                for tensor in batch_output :
-                    shape = list(tensor.shape)
-                    shape[0] = index.length
-                    output = np.empty(shape, tensor.dtype)
-                    output[:] = tensor[offset: offset + index.length]
-                    outputs.append(output)
-                offset += index.length
-                self.io_queues[index.qid].put((outputs))
+                try :
+                    for tensor in batch_output :
+                        shape = list(tensor.shape)
+                        shape[0] = index.length
+                        output = np.empty(shape, tensor.dtype)
+                        output[:] = tensor[offset: offset + index.length]
+                        outputs.append(output)
+                    offset += index.length
+                    
+                except : 
+                    self.emit_metric({'output_handler_error_counter' : 1})
+                    logger.error('output_handler runtime error.')        
+                    logger.error(traceback.format_exc())
+
+                finally :
+                    self.io_queues[index.qid].put((outputs))
+            
             self.emit_metric({'backend_scatter_cost' : time() - start_ts})
 
         logger.debug('output_handler exit.')
 
     def mps_model_handler(self) :
-        # 1. create backend model process
-        conn_backend, conn_model = mp.Pipe()
-        proc = mp.Process(
-            target = model_process,
-            args = (self.name, self.model_type, self.model_path, 
-                    self.input_shm_queue , conn_model, 
-                    self.input_info, self.output_info))
-        proc.start()
+        try :
+            # 1. create backend model process
+            conn_backend, conn_model = mp.Pipe()
+            proc = mp.Process(
+                target = model_process,
+                args = (self.name, self.model_type, self.model_path, 
+                        self.input_shm_queue , conn_model, 
+                        self.input_info, self.output_info))
+            proc.start()
 
-        # 2. create shared memory
-        conn_backend.send(self.input_shm_name_set)
+            # 2. create shared memory
+            conn_backend.send(self.input_shm_name_set)
 
-        output_shm_name = conn_backend.recv()
-        output_shm = []
-        for shn_name, info in zip(output_shm_name, self.output_info) :
-            sh = ShmHandler(shn_name, info['max_shape'], info['dtype'])
-            sh.load_shm()
-            output_shm.append(sh)
+            output_shm_name = conn_backend.recv()
+            output_shm = []
+            for shn_name, info in zip(output_shm_name, self.output_info) :
+                sh = ShmHandler(shn_name, info['max_shape'], info['dtype'])
+                sh.load_shm()
+                output_shm.append(sh)
+        except :
+            logger.error('mps_model_handler initialize error')
+            logger.error(traceback.format_exc())
+            return
 
         # 3. inference
         while self.alive :
@@ -473,21 +519,33 @@ class Backend(object) :
                     self.batched_tensor_queue.get(timeout=1)
             except queue.Empty :
                 continue
-
-            model_start_ts = time()
-            conn_backend.send((shm_idx, shapes))
-            shapes = conn_backend.recv()
-            self.emit_metric({'backend_forward_model_cost' : time() - model_start_ts})
-
+            except :
+                logger.error('mps_model_handler error')
+                logger.error(traceback.format_exc())
+            
             batch_output = []
-            for shape, sh in zip(shapes, output_shm) :
-                shm_arr = sh.ndarray(shape)
-                output_arr = np.empty(shape, shm_arr.dtype)
-                output_arr[:] = shm_arr[:]
-                batch_output.append(output_arr)
+            try :
+                model_start_ts = time()
+                conn_backend.send((shm_idx, shapes))
+                shapes = conn_backend.recv()
+                self.emit_metric({'backend_forward_model_cost' : time() - model_start_ts})
 
-            self.emit_metric({'backend_forward_cost' : time() - start_ts})
-            self.output_tensor_queue.put((batch_output, batch_index))
+                for shape, sh in zip(shapes, output_shm) :
+                    shm_arr = sh.ndarray(shape)
+                    output_arr = np.empty(shape, shm_arr.dtype)
+                    output_arr[:] = shm_arr[:]
+                    batch_output.append(output_arr)
+
+                self.emit_metric({'backend_forward_cost' : time() - start_ts})
+
+            except :
+                logger.error('mps_model_handler error')
+                logger.error(traceback.format_exc())
+                self.emit_metric({'mps_model_handler_error_counter' : 1})
+
+            finally :
+                self.output_tensor_queue.put((batch_output, batch_index))
+
         
         # 4. clean 
         conn_backend.send(EXIT_SIG)

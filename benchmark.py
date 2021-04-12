@@ -116,14 +116,15 @@ def metrics(metric_q) :
     
     print('------------------------------')
     for k, v in metrics.items() :
-        if k == 'cnt' :
+        if k == 'request_counter' :
             continue
-        if k == 'backend_batch_size' :
-            print('{:30s} avg : {:.4f} (num:{})'.format(k, sum(v)/len(v), len(v)))
+        if k == 'backend_batch_size_value' :
+            print('{:30s} avg : {:.4f} (over {} queries)'.format(
+                'backend_batch_size', sum(v)/len(v), len(v)))
         else :
-            print('{:30s} avg : {:.4f} ms (num:{})'.format(
+            print('{:30s} avg : {:.4f} ms (over {} queries)'.format(
                 k, 1000 * sum(v)/len(v), len(v)))
-    print('Query num : {}'.format(sum(metrics['cnt'])))
+    print('Query num : {}'.format(sum(metrics['request_counter'])))
     print('------------------------------')
         
 
