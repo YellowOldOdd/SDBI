@@ -10,7 +10,6 @@ import threading
 import traceback
 
 from time import time
-# from SimpleDBI.backend_metric import BackendMetric
 from SimpleDBI.shm_handler import ShmHandler, gen_name
 
 EXIT_SIG = -1
@@ -35,44 +34,48 @@ def backend_process(entry_q, metric_q, args) :
 def model_process(
         model_name, model_type, model_path, 
         shm_queue, conn, input_info, output_info) :
-    # 1. init model
-    if model_type == 'mock' :
-        from SimpleDBI.mock_model import MockModel
-        model = MockModel(model_name, model_path)
-    elif model_type == 'torch' :
-        from SimpleDBI.torch_model import TorchModel
-        model = TorchModel(model_name, model_path)
-    elif model_type == 'tf' :
-        from SimpleDBI.tf_model import TFModel
-        model = TFModel(model_name, model_path, input_info, output_info)
-    else :
-        logger.error('ERROR MODEL TYPE : {}'.format(model_type))
+    try :
+        # 1. init model
+        if model_type == 'mock' :
+            from SimpleDBI.mock_model import MockModel
+            model = MockModel(model_name, model_path)
+        elif model_type == 'torch' :
+            from SimpleDBI.torch_model import TorchModel
+            model = TorchModel(model_name, model_path)
+        elif model_type == 'tf' :
+            from SimpleDBI.tf_model import TFModel
+            model = TFModel(model_name, model_path, input_info, output_info)
+        else :
+            logger.error('ERROR MODEL TYPE : {}'.format(model_type))
+            raise RuntimeError('ERROR MODEL TYPE : {}'.format(model_type))
 
-    logger.debug('model_process up')
-
-    # 2. create shared memoty
-    # 2.1 create output shared memory
-    output_shm_name = []
-    output_shm = []
-    for info in output_info :
-        shm_name = gen_name(info['name'])
-        sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
-        sh.create_shm()
-        output_shm_name.append(shm_name)
-        output_shm.append(sh)
-
-    # 2.2 load input shared memory
-    input_shm_name_list = conn.recv()
-    input_shm_list = []
-    for input_shm_name in input_shm_name_list :
-        input_shm = []
-        for shm_name, info in zip(input_shm_name, input_info) :
+        # 2. create shared memoty
+        # 2.1 create output shared memory
+        output_shm_name = []
+        output_shm = []
+        for info in output_info :
+            shm_name = gen_name(info['name'])
             sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
-            sh.load_shm()
-            input_shm.append(sh)
-        input_shm_list.append(input_shm)
+            sh.create_shm()
+            output_shm_name.append(shm_name)
+            output_shm.append(sh)
 
-    conn.send(output_shm_name)
+        # 2.2 load input shared memory
+        input_shm_name_list = conn.recv()
+        input_shm_list = []
+        for input_shm_name in input_shm_name_list :
+            input_shm = []
+            for shm_name, info in zip(input_shm_name, input_info) :
+                sh = ShmHandler(shm_name, info['max_shape'], info['dtype'])
+                sh.load_shm()
+                input_shm.append(sh)
+            input_shm_list.append(input_shm)
+
+        conn.send(output_shm_name)
+    except :
+        logger.error('model_process initialize error')
+        logger.error(traceback.format_exc())
+        return 
 
     # 3. inference
     while True :
@@ -80,43 +83,54 @@ def model_process(
         if value == EXIT_SIG :
             break
         
-        # 3.1 load input 
         shm_idx, shapes = value
         inputs = []
-        input_shm = input_shm_list[shm_idx]
-        for shape, sh in zip(shapes, input_shm) :
-            shm_arr = sh.ndarray(shape)
-            # input_arr = shm_arr[:]
-            # inputs.append(input_arr)
-            inputs.append(shm_arr)
-
-        # 3.2 forward
-        outputs = model.forward(*inputs)
-
-        # 3.3 write output
         shapes = []
-        for output, sh in zip(outputs, output_shm) :
-            shape = output.shape
-            shm_arr = sh.ndarray(shape)
-            shm_arr[:] = output[:]
-            shapes.append(shape)
 
-        conn.send(shapes)
-        shm_queue.put(shm_idx) # send shared memory to avalible queue
+        try :
+            # 3.1 load input 
+            input_shm = input_shm_list[shm_idx]
+            for shape, sh in zip(shapes, input_shm) :
+                shm_arr = sh.ndarray(shape)
+                inputs.append(shm_arr)
+
+            # 3.2 forward
+            outputs = model.forward(*inputs)
+
+            # 3.3 write output
+            for output, sh in zip(outputs, output_shm) :
+                shape = output.shape
+                shm_arr = sh.ndarray(shape)
+                shm_arr[:] = output[:]
+                shapes.append(shape)
+
+        except :
+            logger.error('model_process runtime error')
+            logger.error(traceback.format_exc())
+        finally :
+            conn.send(shapes)
+            shm_queue.put(shm_idx) # send shared memory to avalible queue
+
     
     # 4. clean
-    for input_shm in input_shm_list :
-        for sh in input_shm :
+    try :
+        for input_shm in input_shm_list :
+            for sh in input_shm :
+                sh.close()
+
+        conn.send(True)
+        stat = conn.recv()
+        assert stat
+        for sh in output_shm :
             sh.close()
 
-    conn.send(True)
-    stat = conn.recv()
-    assert stat
-    for sh in output_shm :
-        sh.close()
+        conn.close()
+    except :
+        logger.error('model_process destructor error')
+        logger.error(traceback.format_exc())
 
-    conn.close()
     logger.debug('Model process exit.')
+    
 
 class Backend(object) : 
 
