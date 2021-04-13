@@ -37,7 +37,7 @@ def backend_process(entry_q, metric_q, args) :
 
 def model_process(
         model_name, model_type, model_path, 
-        shm_queue, conn, input_info, output_info) :
+        shm_queue, conn, input_info, output_info, pid, metric_q) :
     try :
         # 1. init model
         if model_type == 'mock' :
@@ -80,7 +80,9 @@ def model_process(
         logger.error('model_process initialize error')
         logger.error(traceback.format_exc())
         return 
+    logger.error('model_process <{}> initialize done'.format(model_name))
 
+    tags = {'model' : '{}_{}'.format(model_name, pid)}
     # 3. inference
     while True :
         value = conn.recv()
@@ -91,6 +93,7 @@ def model_process(
         inputs = []
         output_shapes = []
         try :
+            ts = time()
             # 3.1 load input 
             input_shm = input_shm_list[shm_idx]
             for shape, sh in zip(input_shapes, input_shm) :
@@ -106,6 +109,13 @@ def model_process(
                 shm_arr = sh.ndarray(shape)
                 shm_arr[:] = output[:]
                 output_shapes.append(shape)
+
+            if metric_q is not None :
+                metric_q.put({
+                    "tags"   : tags,
+                    "fields" : {'model_proc_cost' : time() - ts},
+                })
+                
 
         except :
             logger.error('model_process runtime error')
@@ -133,7 +143,7 @@ def model_process(
         logger.error('model_process destructor error')
         logger.error(traceback.format_exc())
 
-    logger.debug('Model process exit.')
+    logger.error('Model process exit.')
     
 
 class Backend(object) : 
@@ -218,7 +228,7 @@ class Backend(object) :
             self.threads[fname] = t
         
         for idx in range(self.duplicate_num) : 
-            t = threading.Thread(target=self.mps_model_handler, )
+            t = threading.Thread(target=self.mps_model_handler, args=(idx, ))
             t.setDaemon(True)
             t.start()
             self.threads['gpu_model_{}'.format(idx)] = t
@@ -514,7 +524,7 @@ class Backend(object) :
 
         logger.debug('output_handler exit.')
 
-    def mps_model_handler(self) :
+    def mps_model_handler(self, idx) :
         try :
             # 1. create backend model process
             conn_backend, conn_model = mp.Pipe()
@@ -522,7 +532,7 @@ class Backend(object) :
                 target = model_process,
                 args = (self.name, self.model_type, self.model_path, 
                         self.input_shm_queue , conn_model, 
-                        self.input_info, self.output_info))
+                        self.input_info, self.output_info, idx, self.metric_q))
             proc.start()
 
             # 2. create shared memory
