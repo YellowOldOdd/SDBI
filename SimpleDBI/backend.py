@@ -187,11 +187,15 @@ class Backend(object) :
         self.output_info = args.get('output_info')
 
         self.use_mps = False      if self.use_mps is None else self.use_mps
-        self.timeout = 0.001      if self.timeout is None else self.timeout
         self.dynamic_batch = True if self.dynamic_batch is None else self.dynamic_batch
         self.max_batch_size = 32  if self.max_batch_size is None else self.max_batch_size
         self.duplicate_num = 1    if self.duplicate_num is None else self.duplicate_num
 
+        self.adapt = False
+        if self.timeout is None :
+            # print('TIMEOUT IS NONE')
+            self.timeout = 0.01 
+            self.adapt = True
         
     def __del__(self) :
         logger.debug('Backend {} quit'.format(self.name))
@@ -560,7 +564,18 @@ class Backend(object) :
                     output_arr[:] = shm_arr[:]
                     batch_output.append(output_arr)
 
-                self.emit_metric({'backend_forward_cost' : time() - start_ts})
+                fwd_cost = time() - start_ts
+                self.emit_metric({'backend_forward_cost' : fwd_cost})
+
+                if self.adapt :
+                    delta = fwd_cost / (0.5 + self.duplicate_num) - self.timeout
+                    if abs(delta) / self.timeout > 0.2 :
+                        self.io_queue_lock.acquire()
+                        self.timeout = self.timeout * 0.8 + (self.timeout + delta) * 0.2
+                        self.io_queue_lock.release()
+                        # print('forward cost : {}, timeout : {}'.format(
+                        #     fwd_cost, self.timeout
+                        # ))
 
             except :
                 logger.error('mps_model_handler error')

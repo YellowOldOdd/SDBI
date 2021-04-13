@@ -30,8 +30,9 @@ class Session(object) :
                 duplicate_num : int = 1,
                 model_type : str = 'torch',
                 max_batch_size : int = 32, 
-                timeout : float = 0.003,
+                # timeout : float = 0.003,
                 metric : bool = False,
+                timeout = None,
     ) : 
         global inference_context_queue 
         assert inference_context_queue 

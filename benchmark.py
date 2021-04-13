@@ -181,7 +181,7 @@ def main() :
     parser.add_argument('--model_num',      type=int,   default=1,       help='Number of gpu model.')
     parser.add_argument('--duration',       type=int,   default=60,      help='Test time.')
     parser.add_argument('--model_type',     type=str,   default='torch', help='model type.')
-    parser.add_argument('--wait_time',      type=float, default=0.01,      help='Wait time(s).')
+    parser.add_argument('--wait_time',      type=float, default=-1,      help='Wait time(s).')
 
     args = parser.parse_args()
 
@@ -218,9 +218,13 @@ def main() :
         'latency_queue'     : latency_q,
         'metric_queue'      : metric_q,
         'model_type'        : args.model_type,
-        'timeout'           : args.wait_time,
+        # 'timeout'           : args.wait_time,
     }
-
+    if args.wait_time > 0 : 
+        params['timeout'] = args.wait_time
+    else :
+        params['timeout'] = None
+    
     # 2. run timer
     timer_proc = threading.Thread(
         target=timer, args = (duration+int(worker_num/10)+5, ))
