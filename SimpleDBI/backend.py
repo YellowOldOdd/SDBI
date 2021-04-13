@@ -210,10 +210,13 @@ class Backend(object) :
     def __del__(self) :
         logger.debug('Backend {} quit'.format(self.name))
     
-    def emit_metric(self, points) :
+    def emit_metric(self, points, tag = None) :
+        mtags = self.tags
+        if tag is not None :
+            mtags.update(tag)
         if self.metric_q is not None :
             self.metric_q.put({
-                "tags"        : self.tags,
+                "tags"        : mtags,
                 "fields"      : points,
             })
 
@@ -548,6 +551,18 @@ class Backend(object) :
             logger.error('mps_model_handler initialize error')
             logger.error(traceback.format_exc())
             return
+        
+        def health_check() :
+            while True :
+                sleep(5)
+                tag = {'model_handler_name' : '{}_{}'.format(self.name, idx)}
+                if proc.is_alive() :
+                    self.emit_metric({'model_handler_health_value' : 1}, tag = tag)
+                else :
+                    self.emit_metric({'model_handler_health_value' : 0}, tag = tag)
+        
+        health_thread = threading.Thread(target=health_check, daemon=True)
+        health_thread.start()
 
         # 3. inference
         while self.alive :
