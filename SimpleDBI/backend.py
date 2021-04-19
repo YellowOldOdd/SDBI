@@ -80,7 +80,7 @@ def model_process(
         logger.error('model_process initialize error')
         logger.error(traceback.format_exc())
         return 
-    logger.error('model_process <{}> initialize done'.format(model_name))
+    logger.info('model_process <{}> initialize done'.format(model_name))
 
     tags = {'model' : '{}_{}'.format(model_name, pid)}
     # 3. inference
