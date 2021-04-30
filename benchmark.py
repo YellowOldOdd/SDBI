@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from time import time, sleep
 
 from SimpleDBI.session import Session, Run
-from SimpleDBI.backend_metric import BackendMetric
 
 modelfile = 'test.jit'
 
@@ -83,42 +82,55 @@ def time_simple_dbi(params) :
     # 3. performance testing loop
     while time() < end + 1 :
         request_beg = time()
-        output, metric = sess.forward(np_arr)
+        output = sess.forward(np_arr)
         request_end = time()
         # record metric in specific time range
         if request_beg >= beg and request_beg < end :
             latency.append(request_end - request_beg)
-            metric_l.append(metric)
+            # metric_l.append(metric)
 
     # check result by MockModel(copy input to output)
     if params['model_type'] == 'mock' :
         for idx in range(params['worker_batch']) :
             assert output[idx][0] == np_arr[idx][0][0][0]
             assert output[idx][1] == np_arr[idx][0][0][1]
-    
-    # 4. send metric 
-    metric_d = {}
-    for k in BackendMetric.keys() :
-        metric_d[k] = []
-
-    for m in metric_l :
-        m_d = BackendMetric.analysis(m)
-        for k, v in m_d.items() :
-            metric_d[k].append(v)
 
     q = params['latency_queue']
     q.put(latency)
-    q.put(metric_d)
     return 
 
-def collector(q, batch_size, duration) :
-    # session(client) metric
-    latency = []
+def metrics(metric_q) :
+    metrics = {}
+    while True :
+        try :
+            value = metric_q.get()
+            if value == 'END' :
+                break
+            # print(value)
+            for k, v in value['fields'].items() :
+                if metrics.get(k) is None :
+                    metrics[k] = []
+                metrics[k].append(v)
+        except queue.Empty :
+            break
     
-    # backend metric
-    backend_metric = {}
-    for k in BackendMetric.keys() :
-        backend_metric[k] = []
+    print('------------------------------')
+    for k, v in metrics.items() :
+        if k in ['request_counter', 'input_tensor_qsize_value', 
+            'batched_tensor_qsize_value', 'output_tensor_qsize_value'] :
+            continue
+        if k == 'backend_batch_size_value' :
+            print('{:30s} avg : {:.4f} (over {} queries)'.format(
+                'backend_batch_size', sum(v)/len(v), len(v)))
+        else :
+            print('{:30s} avg : {:.4f} ms (over {} queries)'.format(
+                k, 1000 * sum(v)/len(v), len(v)))
+    print('Query num : {}'.format(sum(metrics['request_counter'])))
+    print('------------------------------')
+        
+
+def collector(q, batch_size, duration) :
+    latency = []
 
     # 1. collecting metric
     while True :
@@ -126,11 +138,12 @@ def collector(q, batch_size, duration) :
             l = q.get()
             if l == 'END' :
                 break
-            if isinstance(l, list) :
-                latency.extend(l)
-            if isinstance(l, dict) :
-                for k, v in l.items() :
-                    backend_metric[k].extend(v)
+            # assert isinstance(l, list) 
+            if not isinstance(l, list) :
+                print(l)
+                print(type(l))
+            assert isinstance(l, list) 
+            latency.extend(l)
         except queue.Empty :
             break
 
@@ -143,33 +156,8 @@ def collector(q, batch_size, duration) :
     print('avg throughput : {:.4f}'.format(batch_size*req_num/duration))
     print('p50 latency    : {:.4f} ms'.format(1000*latency[int(req_num*0.50)]))
     print('p99 latency    : {:.4f} ms'.format(1000*latency[int(req_num*0.99)]))
-    print()
-    
-    if len(backend_metric) == 0 :
-        return
-    
-    # 3. report backend(server) metric 
-    print('----------')
-    print('Backend metric :')
-    for k,v in backend_metric.items() :
-        if k == 'batch_size' :
-            continue
-        print('avg {:25s}    : {:.4f} ms'.format(k, 1000*sum(v)/len(v)))
-    
-    batch_sizes = {}
-    for v in backend_metric['batch_size'] :
-        if batch_sizes.get(v) is None :
-            batch_sizes[v] = 0
-        batch_sizes[v] += 1
-    
-    batch_num = 0
-    batch_sum = 0
-    for bs, num in batch_sizes.items() :
-        batch_num += num / bs
-        batch_sum += num
-        batch_sizes[bs] = num / bs
-    print('Batch size histogram : {}'.format(batch_sizes))
-    print('Avg batch size : {}'.format(batch_sum / batch_num))
+    print('------------------------------')
+
     return 
     
 def timer(total_time) :
@@ -193,7 +181,7 @@ def main() :
     parser.add_argument('--model_num',      type=int,   default=1,       help='Number of gpu model.')
     parser.add_argument('--duration',       type=int,   default=60,      help='Test time.')
     parser.add_argument('--model_type',     type=str,   default='torch', help='model type.')
-    parser.add_argument('--wait_time',      type=float, default=0.01,      help='Wait time(s).')
+    parser.add_argument('--wait_time',      type=float, default=-1,      help='Wait time(s).')
 
     args = parser.parse_args()
 
@@ -218,6 +206,7 @@ def main() :
     
     # collect letency metric(consider this is a tsdb client)
     latency_q = mp.Queue(maxsize=worker_num * 100)
+    metric_q = mp.Queue(maxsize=worker_num * 100)
 
     params = {
         'dynamic_batch'     : args.dynamic_batch,
@@ -227,10 +216,15 @@ def main() :
         'start_timestamp'   : start_time.timestamp(),
         'end_timestamp'     : end_time.timestamp(),
         'latency_queue'     : latency_q,
+        'metric_queue'      : metric_q,
         'model_type'        : args.model_type,
-        'timeout'           : args.wait_time,
+        # 'timeout'           : args.wait_time,
     }
-
+    if args.wait_time > 0 : 
+        params['timeout'] = args.wait_time
+    else :
+        params['timeout'] = None
+    
     # 2. run timer
     timer_proc = threading.Thread(
         target=timer, args = (duration+int(worker_num/10)+5, ))
@@ -241,10 +235,16 @@ def main() :
         target=collector, args = (latency_q, args.worker_batch, duration))
     collector_proc.start()
 
+    metric_proc = threading.Thread(target=metrics, args = (metric_q,))
+    metric_proc.start()
+
     # 4. run inference benchmark 
     if args.dynamic_batch or args.model_num > 1:
         print('Run Benchmark with Simple Dynamic Batching Inference')
-        Run(target = time_simple_dbi, worker_num=worker_num, args = (params,))
+        Run(target = time_simple_dbi, 
+            worker_num = worker_num, 
+            metric_queue = metric_q, 
+            args = (params,))
     else :
         print('Run Benchmark with Torch')
         proc_list = []
@@ -257,8 +257,11 @@ def main() :
 
     # 5. join and exit
     latency_q.put('END')
+    sleep(1)
+    metric_q.put('END')
     collector_proc.join()
     timer_proc.join()
+    metric_proc.join()
 
 if __name__ == '__main__'  :
     main()
