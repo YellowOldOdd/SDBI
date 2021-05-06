@@ -49,6 +49,9 @@ def model_process(
         elif model_type == 'tf' :
             from SimpleDBI.tf_model import TFModel
             model = TFModel(model_name, model_path, input_info, output_info)
+        elif model_type == 'tensorrt' :
+            from SimpleDBI.tensorrt_model import TensorRTModel
+            model = TensorRTModel(model_name, model_path)
         else :
             logger.error('ERROR MODEL TYPE : {}'.format(model_type))
             raise RuntimeError('ERROR MODEL TYPE : {}'.format(model_type))
