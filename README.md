@@ -161,6 +161,9 @@ multiprocess.shared_memory在回收时，在一些系统下会报leak或已经�
 export PYTHONWARNINGS=ignore
 ```
 
+## TensorRT Support
+目前TensorRT模块只支持使用[torch2trt](https://github.com/NVIDIA-AI-IOT/torch2trt) 转化和保存的模型。 
+
 ### 最后
 If **有人感兴趣** and **我有时间** ：
   - 支持一下TensorRT/TensorCore FP16，以及某个特定版本的TF。
