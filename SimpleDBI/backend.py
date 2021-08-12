@@ -451,9 +451,10 @@ class Backend(object) :
                 
                 end = time() + self.timeout
                 while True :
-                    if time() > end and batch_size > 1 : 
-                        latest_tensor, latest_qid = None, None
-                        break
+                    if self.batched_tensor_queue.qsize() <= 1 :
+                        if time() > end and batch_size > 1 : 
+                            latest_tensor, latest_qid = None, None
+                            break
                     try :
                         latest_tensor, latest_qid, arrive_ts = \
                             self.input_tensor_queue.get(timeout = self.timeout)
