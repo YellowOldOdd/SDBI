@@ -21,6 +21,18 @@ NV的Triton包含了Dynamic Batching功能。我也用cpp写过一版。但是�
 
 模型Resnet50，输入(N,3,224,224)。使用某云的V100。
 
+首先使用如下命令下载并生成测试用模型
+
+```
+python fake_resnet50.py
+```
+
+fake_resnet50.py脚本会下载ImageNet上预训练好的resnet50模型
+
+并将其分别转换为jit、torch2trt、onnx等几种格式,保存在test目录下
+
+后面的介绍中，如无特殊说明，使用的jit格式模型进行的测试
+
 ## 测试结果
 
 我们先测一下Torch性能上限，好对数据有个基本了解。
@@ -30,8 +42,6 @@ NV的Triton包含了Dynamic Batching功能。我也用cpp写过一版。但是�
 对应测试命令：
 
 ```
-# 生成一个假模型
-python fake_resnet50.py
 # 测试
 python benchmark.py  --no_dynamic_batch --worker_num=N --worker_batch=M
 ```
@@ -162,9 +172,48 @@ export PYTHONWARNINGS=ignore
 ```
 
 ## TensorRT Support
-目前TensorRT模块只支持使用[torch2trt](https://github.com/NVIDIA-AI-IOT/torch2trt) 转化和保存的模型。 
+
+目前TensorRT模块支持两种方式转化出的模型:
+
+- torch2trt: 使用[torch2trt](https://github.com/NVIDIA-AI-IOT/torch2trt) 转化和保存的模型(model_type=tensorrt)。 
+
+- onnx2trt: 以及通过 pytorch-onnx-tensorrt 方式转化出的模型(model_type=onnx2trt)
+
+两种方式暂时均只支持FP32和FP16的推理
+
+torch2trt更简单，但推荐使用pytorch-onnx-tensorrt的方式进行模型转换，该方法的fp16推理性能要显著优于torch2trt，后面有测试结果
+
+使用onnx2trt转换的模型的方式如下：
+
+首先使用下面命令，将之前已经导出好的onnx格式模型转化为fp16的tensorrt模型
+
+```
+python onnx2tensorrt.py
+```
+
+然后运行如下命令进行测试：
+
+``` shell
+# benchmark test
+python benchmark.py  --no_dynamic_batch --worker_num=1 --worker_batch=16 --model_type=onnx2trt --model_path=test/res50_onnx2trt_fp16.trt --data_type=float16
+
+# dynamic test
+python benchmark.py --worker_num=64 --worker_batch=1 --max_batch_size=16 --model_num=1 --wait_time=0.01 --model_type=onnx2trt --model_path=test/res50_onnx2trt_fp16.trt --data_type=float16
+```
+
+onnx2trt在fp16下的效果要显著优于torch2trt以及原始的jit，测试记录如下：
+
+benchmark测试设置均为 （ --worker_num=1 --worker_batch=16 ）
+
+dynamic batch测试设置均为（--worker_num=64 --worker_batch=1 --max_batch_size=16 --model_num=1 --wait_time=0.01)
+
+|模型格式|throughput(benchmark)|latency(benchmark)|throughput(dynamic)|lantency(dynamic)|
+|:-:|:-:|-:|-:|-:|  
+| torch(jit) | 902 | 17.71 ms | 867 | 73.74 |
+| torch2trt(fp16) | 1264 | 12.24 ms | 1258 | 50.84 |
+| onnx2trt(fp16) | **3736** | **4.28** | **3168** | **20.20** |
 
 ### 最后
 If **有人感兴趣** and **我有时间** ：
-  - 支持一下TensorRT/TensorCore FP16，以及某个特定版本的TF。
+  - 支持一下TensorCore FP16，以及某个特定版本的TF。
   - 输出还没有全用shared memory(主要是我懒)，所以大输出模型的 吞吐/延迟 会受到数据拷贝的影响。可以改进。。。
