@@ -52,6 +52,9 @@ def model_process(
         elif model_type == 'tensorrt' :
             from SimpleDBI.tensorrt_model import TensorRTModel
             model = TensorRTModel(model_name, model_path)
+        elif model_type == 'onnx2trt':
+            from SimpleDBI.onnx2trt_model import TensorRTModel
+            model = TensorRTModel(model_name, model_path)
         else :
             logger.error('ERROR MODEL TYPE : {}'.format(model_type))
             raise RuntimeError('ERROR MODEL TYPE : {}'.format(model_type))
